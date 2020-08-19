@@ -25,7 +25,8 @@
 # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
-from typing import Tuple
+import uuid
+from typing import Any, Dict, List, Tuple
 
 from flask import Flask
 
@@ -340,4 +341,165 @@ def test_app_create_modular_apps():
 
         rv = client.post('/api/b3', json={'id': 1, 'jsonrpc': '2.0', 'method': 'blue3.fn2', 'params': [':)']})
         assert rv.json == {'id': 1, 'jsonrpc': '2.0', 'result': 'b3: Foo :)'}
+        assert rv.status_code == 200
+
+
+def test_app_create_with_rcp_batch():
+    app = Flask(__name__, instance_relative_config=True)
+    jsonrpc = JSONRPC(app, '/api', enable_web_browsable_api=True)
+
+    # pylint: disable=W0612
+    @jsonrpc.method('sum')
+    def sum_(a: int, b: int) -> int:
+        return a + b
+
+    # pylint: disable=W0612
+    @jsonrpc.method('subtract')
+    def subtract(a: int, b: int) -> int:
+        return a - b
+
+    # pylint: disable=W0612
+    @jsonrpc.method('get_user')
+    def get_user(uid: str) -> Dict[str, Any]:
+        return {'uid': uid, 'name': 'John Dee'}
+
+    # pylint: disable=W0612
+    @jsonrpc.method('notify_sum')
+    def notify_sum(numbers: List[int]) -> int:
+        s = sum([x ** 2 for x in numbers])
+        return s
+
+    with app.test_client() as client:
+        idx = uuid.uuid4()
+        rv = client.post('/api', json={'id': idx.hex, 'jsonrpc': '2.0', 'method': 'sum', 'params': [1, 1]})
+        assert rv.json == {'id': idx.hex, 'jsonrpc': '2.0', 'result': 2}
+        assert rv.status_code == 200
+
+        rv = client.post('/api', json=[])
+        assert rv.json == {
+            'error': {
+                'code': -32600,
+                'data': {'message': 'Empty array'},
+                'message': 'Invalid Request',
+                'name': 'InvalidRequestError',
+            },
+            'id': None,
+            'jsonrpc': '2.0',
+        }
+        assert rv.status_code == 400
+
+        rv = client.post('/api', json=[1])
+        assert rv.json == [
+            {
+                'error': {
+                    'code': -32600,
+                    'data': {'message': 'Invalid JSON: 1'},
+                    'message': 'Invalid Request',
+                    'name': 'InvalidRequestError',
+                },
+                'id': None,
+                'jsonrpc': '2.0',
+            }
+        ]
+        assert rv.status_code == 200
+
+        rv = client.post('/api', json=[1, 2, 3])
+        assert rv.json == [
+            {
+                'error': {
+                    'code': -32600,
+                    'data': {'message': 'Invalid JSON: 1'},
+                    'message': 'Invalid Request',
+                    'name': 'InvalidRequestError',
+                },
+                'id': None,
+                'jsonrpc': '2.0',
+            },
+            {
+                'error': {
+                    'code': -32600,
+                    'data': {'message': 'Invalid JSON: 2'},
+                    'message': 'Invalid Request',
+                    'name': 'InvalidRequestError',
+                },
+                'id': None,
+                'jsonrpc': '2.0',
+            },
+            {
+                'error': {
+                    'code': -32600,
+                    'data': {'message': 'Invalid JSON: 3'},
+                    'message': 'Invalid Request',
+                    'name': 'InvalidRequestError',
+                },
+                'id': None,
+                'jsonrpc': '2.0',
+            },
+        ]
+        assert rv.status_code == 200
+
+        rv = client.post(
+            '/api',
+            json=[
+                {'id': '1', 'jsonrpc': '2.0', 'method': 'sum', 'params': [1, 1]},
+                {'id': '2', 'jsonrpc': '2.0', 'method': 'subtract', 'params': [2, 2]},
+                {'id': '3', 'jsonrpc': '2.0', 'method': 'sum', 'params': [3, 3]},
+            ],
+        )
+        assert rv.json == [
+            {'id': '1', 'jsonrpc': '2.0', 'result': 2},
+            {'id': '2', 'jsonrpc': '2.0', 'result': 0},
+            {'id': '3', 'jsonrpc': '2.0', 'result': 6},
+        ]
+        assert rv.status_code == 200
+
+        rv = client.post(
+            '/api',
+            json=[
+                {'id': '1', 'jsonrpc': '2.0', 'method': 'sum', 'params': [1, 1]},
+                {'id': '2', 'jsonrpc': '2.0', 'method': 'subtract', 'params': [2, 2]},
+                {'id': '3', 'jsonrpc': '2.0', 'method': 'get_user', 'params': {'uid': '345'}},
+                {'jsonrpc': '2.0', 'method': 'notify_sum', 'params': [[1, 2, 3, 4, 5]]},
+            ],
+        )
+        assert rv.json == [
+            {'id': '1', 'jsonrpc': '2.0', 'result': 2},
+            {'id': '2', 'jsonrpc': '2.0', 'result': 0},
+            {'id': '3', 'jsonrpc': '2.0', 'result': {'uid': '345', 'name': 'John Dee'}},
+        ]
+        assert rv.status_code == 200
+
+        rv = client.post(
+            '/api',
+            json=[
+                {'jsonrpc': '2.0', 'method': 'notify_sum', 'params': [[1, 2, 3, 4, 5]]},
+                {'jsonrpc': '2.0', 'method': 'notify_sum', 'params': [[1, 2, 3, 4, 5]]},
+                {'jsonrpc': '2.0', 'method': 'notify_sum', 'params': [[1, 2, 3, 4, 5]]},
+            ],
+        )
+        assert rv.json is None
+        assert rv.status_code == 204
+
+        rv = client.post(
+            '/api',
+            json=[
+                {'id': '1', 'jsonrpc': '2.0', 'method': 'sum', 'params': [1, 1]},
+                1,
+                {'id': '2', 'jsonrpc': '2.0', 'method': 'subtract', 'params': [2, 2]},
+            ],
+        )
+        assert rv.json == [
+            {'id': '1', 'jsonrpc': '2.0', 'result': 2},
+            {
+                'error': {
+                    'code': -32600,
+                    'data': {'message': 'Invalid JSON: 1'},
+                    'message': 'Invalid Request',
+                    'name': 'InvalidRequestError',
+                },
+                'id': None,
+                'jsonrpc': '2.0',
+            },
+            {'id': '2', 'jsonrpc': '2.0', 'result': 0},
+        ]
         assert rv.status_code == 200
